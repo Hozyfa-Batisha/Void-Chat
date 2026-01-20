@@ -1,47 +1,98 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { useAuth } from "../context/AuthContext";
+import { ref, push, onValue, serverTimestamp, off } from "firebase/database";
+import { database } from "../firebase";
 
 function Chat() {
   const location = useLocation();
   const navigate = useNavigate();
+  const { currentUser } = useAuth();
   const roomName = location.state?.roomName || "Unknown Room";
-  const username = localStorage.getItem("username") || "Anonymous";
   
   const [messages, setMessages] = useState([]);
   const [newMsg, setNewMsg] = useState("");
+  const [onlineUsers, setOnlineUsers] = useState([]);
   const messagesEndRef = useRef(null);
 
-  // Load messages from localStorage when component mounts
+  const username = currentUser?.displayName || 
+                   currentUser?.profile?.username || 
+                   currentUser?.email?.split('@')[0] || 
+                   "Anonymous";
+
+  // Load messages in real-time
   useEffect(() => {
-    const savedMessages = localStorage.getItem(`chat_${roomName}`);
-    if (savedMessages) {
-      setMessages(JSON.parse(savedMessages));
-    }
+    const messagesRef = ref(database, `chatrooms/${roomName}/messages`);
+    
+    // Listen for new messages
+    const unsubscribe = onValue(messagesRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const messagesList = Object.keys(data).map(key => ({
+          id: key,
+          ...data[key]
+        }));
+        // Sort by timestamp
+        messagesList.sort((a, b) => a.timestamp - b.timestamp);
+        setMessages(messagesList);
+      } else {
+        setMessages([]);
+      }
+    });
+
+    // Cleanup listener on unmount
+    return () => off(messagesRef);
   }, [roomName]);
 
-  // Save messages to localStorage whenever they change
-  useEffect(() => {
-    if (messages.length > 0) {
-      localStorage.setItem(`chat_${roomName}`, JSON.stringify(messages));
-    }
-  }, [messages, roomName]);
-
-  // Auto-scroll to bottom
+  // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const handleSend = () => {
+  // Track online users
+  useEffect(() => {
+    const presenceRef = ref(database, `chatrooms/${roomName}/presence/${currentUser.uid}`);
+    const usersRef = ref(database, `chatrooms/${roomName}/presence`);
+
+    // Set user as online
+    push(presenceRef, {
+      username: username,
+      timestamp: serverTimestamp()
+    });
+
+    // Listen for online users
+    const unsubscribe = onValue(usersRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const users = Object.values(data).map(user => 
+          Object.values(user)[0]?.username
+        ).filter(Boolean);
+        setOnlineUsers([...new Set(users)]);
+      }
+    });
+
+    return () => {
+      off(usersRef);
+    };
+  }, [roomName, currentUser.uid, username]);
+
+  const handleSend = async () => {
     if (!newMsg.trim()) return;
 
-    const newMessage = {
-      sender: username,
-      text: newMsg,
-      timestamp: new Date().toLocaleTimeString(),
-    };
-
-    setMessages([...messages, newMessage]);
-    setNewMsg("");
+    const messagesRef = ref(database, `chatrooms/${roomName}/messages`);
+    
+    try {
+      await push(messagesRef, {
+        sender: username,
+        text: newMsg,
+        timestamp: Date.now(),
+        userId: currentUser.uid
+      });
+      setNewMsg("");
+    } catch (error) {
+      console.error("Error sending message:", error);
+      alert("Failed to send message. Please try again.");
+    }
   };
 
   const handleLeave = () => {
@@ -54,7 +105,9 @@ function Chat() {
       <div className="flex items-center justify-between mb-4 pb-4 border-b border-green-600">
         <div>
           <h1 className="text-3xl font-bold">Room: #{roomName}</h1>
-          <p className="text-sm text-green-300">Logged in as: {username}</p>
+          <p className="text-sm text-green-300">
+            Online: {onlineUsers.length > 0 ? onlineUsers.join(", ") : "Loading..."}
+          </p>
         </div>
         <button
           onClick={handleLeave}
@@ -71,11 +124,16 @@ function Chat() {
             No messages yet. Start the conversation! 💬
           </p>
         ) : (
-          messages.map((msg, index) => (
-            <div key={index} className="mb-3 p-2 hover:bg-gray-800 rounded">
+          messages.map((msg) => (
+            <div key={msg.id} className="mb-3 p-2 hover:bg-gray-800 rounded">
               <div className="flex items-baseline gap-2">
-                <span className="font-bold text-green-300">{msg.sender}</span>
-                <span className="text-xs text-gray-500">{msg.timestamp}</span>
+                <span className={`font-bold ${msg.userId === currentUser.uid ? 'text-green-500' : 'text-green-300'}`}>
+                  {msg.sender}
+                  {msg.userId === currentUser.uid && " (You)"}
+                </span>
+                <span className="text-xs text-gray-500">
+                  {new Date(msg.timestamp).toLocaleTimeString()}
+                </span>
               </div>
               <div className="text-green-400 ml-4 mt-1">{msg.text}</div>
             </div>
